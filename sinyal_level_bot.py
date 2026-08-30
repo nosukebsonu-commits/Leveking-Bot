@@ -787,11 +787,20 @@ async def on_message(message):
 
         if is_banned:
             print(f" 🚨 [BLOCKED] Menghapus pesan terlarang dari '{message.author.name}'...")
+            delete_success = False
             try:
                 await message.delete()
+                delete_success = True
                 print(" ✅ [SUKSES] Pesan berhasil dihapus dari Discord!")
             except discord.Forbidden:
                 print(" ⛔ [ERROR IZIN DISCORD] BOT GAGAL HAPUS PESAN! Role bot belum diberi izin 'Manage Messages' (Kelola Pesan) di Server Settings Discord!")
+                try:
+                    alert = await message.channel.send(
+                        "⚠️ **[PERINGATAN ADMIN]** Pesan di atas melanggar aturan, tetapi bot **Gagal Menghapus** karena Role Bot belum diberi izin **Manage Messages (Kelola Pesan)** di Server Settings Discord!"
+                    )
+                    await alert.delete(delay=10)
+                except Exception:
+                    pass
             except Exception as e:
                 print(f" ⚠️ [WARN] Gagal hapus pesan: {e}")
 
@@ -1432,6 +1441,54 @@ async def importdata(ctx):
 
 @importdata.error
 async def importdata_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("⛔ Perintah ini khusus Admin (memerlukan izin `Manage Server`).")
+
+
+@bot.command(name="diagnose", aliases=["cekbot", "statusbot", "tesbot"])
+@commands.guild_only()
+@commands.has_permissions(manage_guild=True)
+async def diagnose_cmd(ctx):
+    """[ADMIN ONLY] Cek kesehatan bot, izin Discord, dan status filter."""
+    guild = ctx.guild
+    bot_member = guild.me
+    channel_perms = ctx.channel.permissions_for(bot_member)
+
+    can_manage_msgs = channel_perms.manage_messages
+    can_timeout = channel_perms.moderate_members
+    can_kick = bot_member.guild_permissions.kick_members
+    is_admin = bot_member.guild_permissions.administrator
+    has_message_content = intents.message_content
+
+    embed = discord.Embed(
+        title="🩺 Diagnosa Status & Izin Bot",
+        color=discord.Color.green() if (can_manage_msgs and can_timeout) else discord.Color.red()
+    )
+    embed.add_field(
+        name="🔑 Izin Bot di Channel Ini",
+        value=(
+            f"• **Kelola Pesan (Manage Messages)**: {'✅ AKTIF' if can_manage_msgs else '❌ NONAKTIF (Wajib diaktifkan agar bot bisa hapus chat!)'}\n"
+            f"• **Bungkam Member (Timeout Members)**: {'✅ AKTIF' if can_timeout else '❌ NONAKTIF (Wajib diaktifkan agar bot bisa mute!)'}\n"
+            f"• **Keluarkan Member (Kick Members)**: {'✅ AKTIF' if can_kick else '❌ NONAKTIF'}\n"
+            f"• **Administrator Server**: {'✅ AKTIF' if is_admin else '⚠️ NONAKTIF'}"
+        ),
+        inline=False
+    )
+    embed.add_field(
+        name="🛡️ Status Filter & Database",
+        value=(
+            f"• **Total Kata Terlarang**: {len(BANNED_KEYWORDS)} kata (Termasuk `xxnx`, judi, bokep)\n"
+            f"• **Privileged Intents**: {'✅ AKTIF' if has_message_content else '❌ NONAKTIF'}\n"
+            f"• **Channel Rank Khusus**: {is_rank_channel_allowed(ctx)[1] or 'Semua Channel'}"
+        ),
+        inline=False
+    )
+    embed.set_footer(text=f"Server: {guild.name} | Bot Status: Online")
+    await ctx.send(embed=embed)
+
+
+@diagnose_cmd.error
+async def diagnose_error(ctx, error):
     if isinstance(error, commands.MissingPermissions):
         await ctx.send("⛔ Perintah ini khusus Admin (memerlukan izin `Manage Server`).")
 
