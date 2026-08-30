@@ -768,42 +768,56 @@ async def on_message(message):
         return
 
     content = message.content
+    print(f"\n[CHAT MASUK] #{message.channel.name} | User: {message.author.name} (ID: {message.author.id})")
+    print(f" > Isi Pesan: '{content}'")
+    print(f" > Roles: {[r.name for r in message.author.roles]}")
+
+    if not content:
+        print(" ⚠️ [PERINGATAN KRUSIAL] Isi pesan KOSONG ('')! Ini tanda bahwa 'MESSAGE CONTENT INTENT' BELUM DIAKTIFKAN di Discord Developer Portal!")
 
     # 1. Filter Konten Terlarang & Auto-Mod dengan Sistem Strike (Dilewati jika user punya role Fredom / Kebal)
     is_immune = has_automod_immunity(message.author)
-    if not is_immune:
-        if contains_banned_content(content):
-            print(f"[AUTO-MOD BLOCKED] Pesan terlarang dari '{message.author.name}': '{content}' -> Menghapus & memproses sanksi...")
+    print(f" > Status Kebal (Fredom): {is_immune}")
+
+    if is_immune:
+        print(f" 👑 [KEBAL] User '{message.author.name}' memiliki role Fredom/Kebal. Auto-Mod dilewati.")
+    else:
+        is_banned = contains_banned_content(content)
+        print(f" > Terdeteksi Terlarang: {is_banned}")
+
+        if is_banned:
+            print(f" 🚨 [BLOCKED] Menghapus pesan terlarang dari '{message.author.name}'...")
             try:
                 await message.delete()
+                print(" ✅ [SUKSES] Pesan berhasil dihapus dari Discord!")
             except discord.Forbidden:
-                print(f"[PERINGATAN IZIN] Bot TIDAK BISA menghapus pesan '{message.author.name}' karena bot belum diberi izin 'Manage Messages' di Discord!")
+                print(" ⛔ [ERROR IZIN DISCORD] BOT GAGAL HAPUS PESAN! Role bot belum diberi izin 'Manage Messages' (Kelola Pesan) di Server Settings Discord!")
             except Exception as e:
-                print(f"[WARN] Gagal hapus pesan: {e}")
+                print(f" ⚠️ [WARN] Gagal hapus pesan: {e}")
 
             await apply_warning_punishment(message, reason="Judi Online / Konten Dewasa / Kata Terlarang")
             return
 
         if is_suspicious_discord_invite(content):
-            print(f"[AUTO-MOD BLOCKED] Link invite NSFW dari '{message.author.name}' -> Menghapus & memproses sanksi...")
+            print(f" 🚨 [BLOCKED] Menghapus link invite NSFW dari '{message.author.name}'...")
             try:
                 await message.delete()
             except discord.Forbidden:
-                print(f"[PERINGATAN IZIN] Bot TIDAK BISA menghapus pesan karena bot belum diberi izin 'Manage Messages' di Discord!")
+                print(" ⛔ [ERROR IZIN DISCORD] BOT GAGAL HAPUS PESAN! Berikan izin 'Manage Messages' ke role bot!")
             except Exception as e:
-                print(f"[WARN] Gagal hapus pesan: {e}")
+                print(f" ⚠️ [WARN] Gagal hapus pesan: {e}")
 
             await apply_warning_punishment(message, reason="Link Undangan Server Discord NSFW/Dewasa")
             return
 
         if contains_suspicious_shortlink(content):
-            print(f"[AUTO-MOD BLOCKED] Shortlink berbahaya dari '{message.author.name}' -> Menghapus & memproses sanksi...")
+            print(f" 🚨 [BLOCKED] Menghapus shortlink berbahaya dari '{message.author.name}'...")
             try:
                 await message.delete()
             except discord.Forbidden:
-                print(f"[PERINGATAN IZIN] Bot TIDAK BISA menghapus pesan karena bot belum diberi izin 'Manage Messages' di Discord!")
+                print(" ⛔ [ERROR IZIN DISCORD] BOT GAGAL HAPUS PESAN! Berikan izin 'Manage Messages' ke role bot!")
             except Exception as e:
-                print(f"[WARN] Gagal hapus pesan: {e}")
+                print(f" ⚠️ [WARN] Gagal hapus pesan: {e}")
 
             await apply_warning_punishment(message, reason="Tautan Pemendek / Shortlink Berbahaya")
             return
