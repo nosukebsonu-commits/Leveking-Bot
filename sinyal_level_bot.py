@@ -1,34 +1,44 @@
 """
-Bot Discord Level & Rank - "Sinyal" (Multi-Platform & Channel Lock Edition)
-=============================================================================
+Bot Discord Level & Rank - "Sinyal" (Multi-Platform, Channel Lock & Strike System Edition)
+=============================================================================================
 Fitur Utama:
 1. Sistem Level & XP Otomatis:
    - Cooldown 60 detik antar pesan
    - Anti-cheat 4 lapis: min. 5 karakter, variasi karakter unik, batas 20x XP per jam
    - Otomatis mengabaikan command bot (prefix '!') agar tidak disalahgunakan untuk spam XP
    - Tracking Total XP Lifetime (seluruh riwayat XP tersimpan aman)
-2. Pembatasan Channel Cek Rank Khusus:
+2. Sistem Peringatan & Hukuman Otomatis (Progressive Punishment System):
+   - Peringatan 1 & 2: Pesan dihapus + Peringatan resmi counter [X/10]
+   - Peringatan 3 (dan kelipatan 3): Pesan dihapus + **AUTO MUTE (TIMEOUT) 5 MENIT**
+   - Peringatan 10: Pesan dihapus + **AUTO KICK (DIKELUARKAN OTOMATIS DARI SERVER)**
+   - Database peringatan permanen (warnings.json) dengan Atomic Write
+   - Perintah admin: `!warnings @user`, `!resetwarn @user`, `!warn @user <alasan>`
+3. Pembatasan Channel Cek Rank Khusus:
    - Perintah `!rank` dan `!leaderboard` otomatis dibatasi HANYA di channel `#rank` (atau channel yang diset admin)
-   - Jika member ketik `!rank` di channel lain, bot akan memberi tahu untuk pindah ke channel `#rank` (pesan peringatan terhapus otomatis dalam 6 detik)
+   - Jika member ketik `!rank` di channel lain, bot akan memberi tahu untuk pindah ke channel `#rank` (peringatan terhapus dalam 6 detik)
    - Perintah admin `!setrankchannel #channel` / `here` / `all` untuk mengatur channel khusus
-3. Auto-Moderasi & Filter Konten Terlarang:
-   - Filter kata kunci judi online & konten dewasa dengan boundary regex (bebas false-positive & ReDoS safe)
-   - Filter shortlink berbahaya (bit.ly, tinyurl, cutt.ly, s.id, dll)
+4. Auto-Moderasi & Filter Konten Komprehensif (Maximum Shield):
+   - Database besar kata kunci judi online, kasino, togel, pornografi lokal & internasional, typo variants, dan scam
+   - Smart Normalizer: Mendeteksi trik bypass seperti de-spacing ('x n x x', 'b o k e p'), leetspeak ('p0rn', '$lot', 'b0k3p'), dan simbol ('x.n.x.x', 's_l_o_t')
+   - Filter shortlink berbahaya (bit.ly, tinyurl, cutt.ly, s.id, heylink, dll)
    - Deteksi & blokir link undangan Discord yang mengarah ke server NSFW/dewasa
    - Perintah admin `!addbanword` dan `!banwordlist` dengan penyimpanan permanen & atomic write
-4. Perintah Member:
+5. Perintah Member:
    - `!rank` / `!rank @user` — Profil level, XP, visual progress bar, ranking, & total lifetime XP
    - `!leaderboard` (atau `!top`, `!lb`) — Top 10 leaderboard server dengan medali
    - `!help` — Menu bantuan interaktif
-5. Perintah Admin (Manage Server):
+6. Perintah Admin (Manage Server):
    - `!addxp @user <jumlah>` — Tambah XP (maks. 10.000)
    - `!setlevel @user <level>` — Set level (rentang 0-1000) dengan sinkronisasi Total XP
-   - `!setrankchannel [#channel/here/all]` — Kunci perintah !rank hanya di channel tertentu
+   - `!setrankchannel [#channel/here/all]` — Kunci command !rank hanya di channel tertentu
+   - `!warnings @user` — Cek jumlah peringatan member
+   - `!resetwarn @user` — Reset/hapus peringatan member ke 0
+   - `!warn @user <alasan>` — Beri peringatan manual ke member
    - `!addbanword <kata>` — Tambah kata terlarang ke filter
    - `!banwordlist` — Cek jumlah kata terlarang aktif
-   - `!exportdata` — (Backup) Unduh file database levels & banwords langsung di Discord
+   - `!exportdata` — (Backup) Unduh file database levels, banwords, warnings langsung di Discord
    - `!importdata` — (Restore/Migrasi) Upload file backup levels.json untuk memindahkan data antar platform
-6. Kompatibilitas Multi-Platform (Railway, Render, VPS, Heroku, Docker, Local):
+7. Kompatibilitas Multi-Platform (Railway, Render, VPS, Heroku, Docker, Local):
    - Multi-token variable support (DISCORD_TOKEN, BOT_TOKEN, TOKEN)
    - Configurable DATA_DIR untuk Persistent Volume
    - Built-in HTTP Health Check Server (otomatis aktif jika env PORT terdeteksi)
@@ -44,6 +54,7 @@ import time
 import re
 import asyncio
 import io
+from datetime import datetime, timedelta, timezone
 import aiohttp
 from aiohttp import web
 
@@ -70,6 +81,7 @@ os.makedirs(DATA_DIR, exist_ok=True)
 DATA_FILE = os.path.join(DATA_DIR, "levels.json")
 BANWORDS_FILE = os.path.join(DATA_DIR, "banned_words.json")
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
+WARNINGS_FILE = os.path.join(DATA_DIR, "warnings.json")
 COMMAND_PREFIX = "!"
 PORT = os.environ.get("PORT")  # Mendeteksi port dari Railway/Render
 
@@ -84,32 +96,56 @@ MAX_XP_PER_HOUR = 20      # Batas maksimal user dapat XP per jam
 db_lock = asyncio.Lock()
 
 # ==========================================
-# DAFTAR FILTER KONTEN TERLARANG
+# DATABASE FILTER KONTEN TERLARANG LENGKAP
 # ==========================================
 DEFAULT_BANNED_KEYWORDS = [
-    # Judi online & taruhan
-    "slot gacor", "situs slot", "judi online", "bandar togel", "agen togel",
-    "maxwin", "slot88", "situs toto", "bo slot", "rtp slot", "scatter hitam",
-    "deposit pulsa slot", "link alternatif slot", "zeus slot", "pragmatic play",
-    "judol", "depo slot",
-    # Konten dewasa / NSFW
-    "bokep", "porn", "xnxx", "xvideos", "onlyfans leak", "nude leak",
-    "video mesum", "vidio bokep", "link bokep", "doodstream", "terabox nsfw",
-    "pornography", "bokep indo", "pemersatu bangsa nsfw"
+    # 1. JUDI ONLINE, SLOT, TOGEL, KASINO
+    "slot gacor", "situs slot", "judi online", "judol", "bandar togel", "agen togel",
+    "togel online", "toto gelap", "situs toto", "toto macau", "maxwin", "slot88",
+    "slot777", "gacor88", "bo slot", "rtp slot", "rtp live", "scatter hitam",
+    "scatter merah", "deposit pulsa slot", "depo slot", "depo pulsa", "link alternatif slot",
+    "zeus slot", "pragmatic play", "olympus slot", "gates of olympus", "mahjong ways",
+    "spaceman slot", "rajatogel", "indotogel", "live casino", "baccarat online",
+    "roulette online", "judi bola", "sbobet", "link gacor", "idn poker",
+    "poker online uang asli", "agen judi", "bandar judi", "jackpot slot", "freechip slot",
+    "situs judi", "judi slot", "agen slot",
+
+    # 2. PORNOGRAFI & SITUS DEWASA (INTERNASIONAL & TYPO)
+    "bokep", "porn", "pron", "porno", "pornography", "xnxx", "xxnx", "xnx", "xxnxx",
+    "xnxxcom", "xvideos", "xvideo", "xhamster", "pornhub", "phub", "redtube",
+    "youporn", "brazzers", "onlyfans", "onlyfans leak", "nude leak", "doodstream",
+    "terabox nsfw", "spankbang", "eporner", "beeg", "chaturbate", "stripchat",
+    "bongacams", "camwhores", "leak girls", "leaked nudes", "jav", "javhd",
+    "javsubindo", "avgle", "lustcinema", "xlecx", "multporn",
+
+    # 3. KONTEN DEWASA LOKAL, ANIME NSFW & SLANG
+    "video mesum", "vidio bokep", "link bokep", "bokep indo", "pemersatu bangsa nsfw",
+    "pemersatu bangsa", "hentai", "doujin", "doujinshi", "nekopoi", "nhentai",
+    "hanime", "hentaihaven", "rule34", "r34", "e621", "vcs", "vcs murah", "vcs real",
+    "open bo", "openbo", "cewek bispak", "cewe bispak", "bispak", "colmek", "ngocok",
+    "sange", "video viral mesum", "link video viral", "pap tt", "pap bugil",
+    "bokep jepang", "bokep viral", "bokep bocil", "tobrut nsfw",
+
+    # 4. SCAM & PHISHING DISCORD
+    "free discord nitro", "free nitro", "discord-nitro", "steam gift card free",
+    "claim nitro", "nitro generator", "free robux"
 ]
 
-# Pola domain link pemendek (menggunakan regex pola URL yang presisi)
+# Pola domain link pemendek & platform redirect berbahaya
 SUSPICIOUS_SHORTLINK_PATTERNS = [
     r"https?://(?:www\.)?bit\.ly/\S+",
     r"https?://(?:www\.)?tinyurl\.com/\S+",
     r"https?://(?:www\.)?cutt\.ly/\S+",
     r"https?://(?:www\.)?s\.id/\S+",
     r"https?://(?:www\.)?shorturl\.at/\S+",
+    r"https?://(?:www\.)?heylink\.me/\S+",
+    r"https?://(?:www\.)?biolink\.to/\S+",
     r"\bbit\.ly/\S+",
     r"\btinyurl\.com/\S+",
     r"\bcutt\.ly/\S+",
     r"\bs\.id/\S+",
-    r"\bshorturl\.at/\S+"
+    r"\bshorturl\.at/\S+",
+    r"\bheylink\.me/\S+"
 ]
 
 # Pola link undangan server Discord
@@ -120,7 +156,7 @@ DISCORD_INVITE_PATTERNS = [
 # Kata kunci NSFW yang menyertai link undangan Discord
 DISCORD_INVITE_NSFW_KEYWORDS = [
     "nsfw", "18+", "hentai", "ecchi", "lewd", "nude", "hot girl", "onlyfans",
-    "bokep", "porn", "xxx", "sange", "cewek bispak", "cewe bispak", "vcs"
+    "bokep", "porn", "xxx", "sange", "cewek bispak", "cewe bispak", "vcs", "open bo", "jav"
 ]
 
 # Setup Intents
@@ -136,8 +172,35 @@ xp_history_per_hour = {}    # {user_id: [timestamp_1, timestamp_2, ...]}
 
 
 # ==========================================
-# MANAJEMEN CONFIG & BANNED WORDS (ATOMIC)
+# MANAJEMEN DATABASE (ATOMIC WRITE)
 # ==========================================
+def load_warnings() -> dict:
+    """Memuat data peringatan/strike dari warnings.json."""
+    if os.path.exists(WARNINGS_FILE):
+        try:
+            with open(WARNINGS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def save_warnings(warnings_data: dict):
+    """Menyimpan data peringatan menggunakan teknik Atomic Write."""
+    tmp_file = f"{WARNINGS_FILE}.tmp"
+    try:
+        with open(tmp_file, "w", encoding="utf-8") as f:
+            json.dump(warnings_data, f, indent=2, ensure_ascii=False)
+        os.replace(tmp_file, WARNINGS_FILE)
+    except Exception as e:
+        print(f"[ERROR] Gagal menyimpan warnings ke {WARNINGS_FILE}: {e}")
+        if os.path.exists(tmp_file):
+            try:
+                os.remove(tmp_file)
+            except Exception:
+                pass
+
+
 def load_config() -> dict:
     """Memuat konfigurasi server (seperti channel rank yang diizinkan)."""
     if os.path.exists(CONFIG_FILE):
@@ -203,66 +266,200 @@ BANNED_KEYWORDS = load_banned_words()
 
 
 # ==========================================
-# LOGIKA PEMBATASAN CHANNEL RANK
+# SISTEM HUKUMAN BERTINGKAT (STRIKE SYSTEM)
 # ==========================================
-def is_rank_channel_allowed(ctx) -> tuple:
+async def apply_warning_punishment(message: discord.Message, reason: str):
     """
-    Mengecek apakah perintah !rank atau !leaderboard diizinkan di channel ini.
-    - Admin (Manage Server) selalu diizinkan di mana saja.
-    - Jika ada channel yang dikunci via !setrankchannel, hanya channel itu yang diizinkan.
-    - Jika belum dikunci manual, otomatis mencari channel bernama 'rank' di server.
+    Menambahkan peringatan ke user dan menerapkan hukuman otomatis:
+    - 1 & 2 Peringatan: Peringatan tertulis [X/10]
+    - 3 Peringatan (dan kelipatan 3): Mute (Timeout) 5 Menit
+    - 10 Peringatan: Kick (Dikeluarkan dari Server)
     """
-    # Admin bebas pakai di mana saja
-    if ctx.author.guild_permissions.manage_guild:
-        return True, None
+    guild_id = str(message.guild.id)
+    user_id = str(message.author.id)
+    member = message.author
 
-    config = load_config()
-    guild_id = str(ctx.guild.id)
-    guild_conf = config.get(guild_id, {})
+    async with db_lock:
+        warns_data = load_warnings()
+        if guild_id not in warns_data:
+            warns_data[guild_id] = {}
 
-    # 1. Cek jika admin sudah mengunci channel tertentu secara spesifik
-    locked_channel_id = guild_conf.get("rank_channel_id")
-    if locked_channel_id == "all":
-        return True, None
+        current_warns = warns_data[guild_id].get(user_id, 0) + 1
+        warns_data[guild_id][user_id] = current_warns
+        save_warnings(warns_data)
 
-    if locked_channel_id:
-        if ctx.channel.id == int(locked_channel_id):
-            return True, None
-        return False, f"<#{locked_channel_id}>"
+    if current_warns >= 10:
+        # 1. KIRIM DIRECT MESSAGE (DM) PRIBADI SEBELUM DI-KICK
+        try:
+            guild_icon_url = message.guild.icon.url if message.guild.icon else None
+            dm_embed = discord.Embed(
+                title=f"⛔ PEMBERITAHUAN PENGELUARAN DARI SERVER: {message.guild.name} ⛔",
+                description=(
+                    f"Halo **{member.name}**,\n\n"
+                    f"Anda telah **DIKELUARKAN (KICK)** dari server **{message.guild.name}** secara otomatis.\n\n"
+                    f"📌 **Penyebab:** Anda telah mencapai batas maksimal **10/10 Peringatan Pelanggaran**.\n"
+                    f"🚨 **Pelanggaran Terakhir:** {reason}\n\n"
+                    f"Harap patuhi tata tertib dan peraturan komunitas jika Anda bergabung kembali di masa mendatang."
+                ),
+                color=discord.Color.red()
+            )
+            if guild_icon_url:
+                dm_embed.set_thumbnail(url=guild_icon_url)
+            dm_embed.set_footer(text=f"Sistem Keamanan Server {message.guild.name}")
+            await member.send(embed=dm_embed)
+        except Exception:
+            # Member mungkin menutup DM dari server
+            pass
 
-    # 2. Jika belum dikonfigurasi manual, cek apakah ada channel bernama 'rank' di server
-    rank_channel = discord.utils.get(ctx.guild.text_channels, name="rank")
-    if rank_channel:
-        if ctx.channel.id == rank_channel.id:
-            return True, None
-        return False, rank_channel.mention
+        # 2. EKSEKUSI KICK DARI SERVER
+        try:
+            await member.kick(reason=f"Otomatis: Mencapai {current_warns}x Peringatan ({reason})")
+            embed = discord.Embed(
+                title="⛔ MEMBER DIKELUARKAN (KICK) ⛔",
+                description=(
+                    f"{member.mention} telah **DIKELUARKAN DARI SERVER**!\n\n"
+                    f"📊 **Total Peringatan:** **{current_warns}/10**\n"
+                    f"📌 **Pelanggaran Terakhir:** {reason}\n"
+                    f"📩 *Pesan alasan pengeluaran telah dikirimkan via DM ke member.*"
+                ),
+                color=discord.Color.red()
+            )
+            await message.channel.send(embed=embed)
+        except discord.Forbidden:
+            await message.channel.send(
+                f"⚠️ {member.mention} telah mencapai **10/10 Peringatan**, tetapi bot tidak memiliki izin (Kick Members) untuk mengeluarkannya."
+            )
+        except Exception as e:
+            print(f"[ERROR KICK] {e}")
 
-    # 3. Jika tidak ada channel khusus, izinkan di semua channel
-    return True, None
+    elif current_warns == 3 or (current_warns > 3 and current_warns % 3 == 0):
+        # 1. KIRIM DIRECT MESSAGE (DM) PRIBADI SAAT DI-MUTE
+        try:
+            guild_icon_url = message.guild.icon.url if message.guild.icon else None
+            dm_mute = discord.Embed(
+                title=f"🔇 PEMBERITAHUAN MUTE: {message.guild.name} 🔇",
+                description=(
+                    f"Halo **{member.name}**,\n\n"
+                    f"Anda telah **DI-MUTE (TIMEOUT) SELAMA 5 MENIT** di server **{message.guild.name}**.\n\n"
+                    f"📊 **Status Peringatan Anda:** **{current_warns}/10**\n"
+                    f"📌 **Alasan:** Mengirim konten terlarang ({reason})\n\n"
+                    f"⚠️ *Perhatian: Jika Anda mencapai 10x peringatan, Anda akan otomatis dikeluarkan (KICK) dari server!*"
+                ),
+                color=discord.Color.orange()
+            )
+            if guild_icon_url:
+                dm_mute.set_thumbnail(url=guild_icon_url)
+            dm_mute.set_footer(text=f"Sistem Keamanan Server {message.guild.name}")
+            await member.send(embed=dm_mute)
+        except Exception:
+            pass
+
+        # 2. EKSEKUSI TIMEOUT 5 MENIT
+        try:
+            timeout_until = datetime.now(timezone.utc) + timedelta(minutes=5)
+            await member.timeout(timeout_until, reason=f"Peringatan ke-{current_warns}: {reason}")
+            embed = discord.Embed(
+                title="🔇 MEMBER DI-MUTE (TIMEOUT 5 MENIT) 🔇",
+                description=(
+                    f"{member.mention} telah **DI-MUTE selama 5 Menit**!\n\n"
+                    f"📊 **Total Peringatan:** **{current_warns}/10**\n"
+                    f"📌 **Alasan:** Mengirim konten terlarang ({reason})\n\n"
+                    f"⚠️ *Perhatian: Jika mencapai 10x peringatan, member akan otomatis dikeluarkan dari server!*"
+                ),
+                color=discord.Color.orange()
+            )
+            await message.channel.send(embed=embed)
+        except discord.Forbidden:
+            await message.channel.send(
+                f"⚠️ {member.mention} mencapai **{current_warns}/10 Peringatan**, tetapi bot memerlukan izin `Moderate Members (Timeout)` untuk me-mute."
+            )
+        except Exception as e:
+            print(f"[ERROR TIMEOUT] {e}")
+
+    else:
+        # PERINGATAN STANDAR (1, 2, 4, 5, dst)
+        embed = discord.Embed(
+            title="⚠️ PERINGATAN PELANGGARAN ⚠️",
+            description=(
+                f"{member.mention}, pesanmu dihapus karena mengandung **{reason}**.\n\n"
+                f"📊 **Status Peringatan Anda:** **{current_warns}/10**\n"
+                f"• *3x Peringatan*: Auto-Mute (Timeout) 5 Menit\n"
+                f"• *10x Peringatan*: Dikeluarkan Otomatis (Kick)"
+            ),
+            color=discord.Color.gold()
+        )
+        try:
+            warn_msg = await message.channel.send(embed=embed)
+            await warn_msg.delete(delay=10)
+        except Exception:
+            pass
 
 
 # ==========================================
-# LOGIKA AUTO-MODERASI & FILTER KONTEN
+# NORMALISASI TEKS ANTI-BYPASS & AUTO-MOD
 # ==========================================
+def normalize_text_variants(text: str) -> list:
+    """
+    Menghasilkan variasi bentuk teks untuk mendeteksi berbagai teknik bypass:
+    1. Lowercase asli
+    2. Menghilangkan simbol pemisah (misal: 'x.n.x.x' -> 'x n x x')
+    3. De-spacing: menghapus spasi di antara huruf tunggal (misal: 'x n x x' -> 'xnxx')
+    4. Alphanumeric only (misal: 'b_o_k_e_p' -> 'bokep')
+    5. Leetspeak: mengubah @->a, 0->o, 1/!->i, $->s, 3->e, 4->a, 5->s, 7->t, 8->b
+    """
+    if not text:
+        return []
+
+    lowered = text.lower()
+    variants = [lowered]
+
+    # 1. Simbol pemisah -> spasi
+    no_symbols = re.sub(r"[\_\-\.\,\;\|\/\\\*\~\#\+\=\:\(\)\[\]\{\}\?\<\>\!]", " ", lowered)
+    variants.append(no_symbols)
+    clean_spaces = re.sub(r"\s+", " ", no_symbols).strip()
+    variants.append(clean_spaces)
+
+    # 2. De-spacing (mengubah 'x n x x' -> 'xnxx')
+    despaced = re.sub(r"(?<=\b\w)\s+(?=\w\b)", "", clean_spaces)
+    variants.append(despaced)
+
+    # 3. Alphanumeric only (menghilangkan semua non-huruf angka)
+    alphanumeric_only = re.sub(r"[^a-z0-9]", "", lowered)
+    variants.append(alphanumeric_only)
+
+    # 4. Leetspeak mapping
+    leetspeak_map = str.maketrans({
+        "@": "a", "4": "a", "0": "o", "1": "i", "!": "i", "3": "e", "$": "s", "5": "s", "7": "t", "8": "b"
+    })
+    for v in list(variants):
+        variants.append(v.translate(leetspeak_map))
+
+    return list(set(variants))
+
+
 def contains_banned_content(content: str) -> bool:
-    """Mengecek apakah pesan mengandung kata kunci terlarang (Judi/NSFW)."""
+    """Mengecek apakah pesan mengandung konten terlarang (Judi/NSFW/Scam)."""
     if not content:
         return False
 
-    lowered = content.lower()
-    normalized = lowered.replace("_", " ").replace("-", " ").replace(".", "")
+    variants = normalize_text_variants(content)
 
     for keyword in BANNED_KEYWORDS:
         kw = keyword.lower().strip()
         if not kw:
             continue
+
         if " " in kw:
-            if kw in lowered or kw in normalized:
-                return True
+            kw_nospaces = kw.replace(" ", "")
+            for var in variants:
+                if kw in var or kw_nospaces in var.replace(" ", ""):
+                    return True
         else:
             pattern = r'\b' + re.escape(kw) + r'\b'
-            if re.search(pattern, lowered) or re.search(pattern, normalized):
-                return True
+            for var in variants:
+                if re.search(pattern, var):
+                    return True
+
     return False
 
 
@@ -279,11 +476,13 @@ def is_suspicious_discord_invite(content: str) -> bool:
     if not contains_discord_invite(content):
         return False
 
-    lowered = content.lower()
-    normalized = lowered.replace("_", " ").replace("-", " ")
+    variants = normalize_text_variants(content)
     for keyword in DISCORD_INVITE_NSFW_KEYWORDS:
-        if keyword in lowered or keyword in normalized:
-            return True
+        kw = keyword.lower().strip()
+        pattern = r'\b' + re.escape(kw) + r'\b' if " " not in kw else kw
+        for var in variants:
+            if (" " in kw and kw in var) or (" " not in kw and re.search(pattern, var)):
+                return True
     return False
 
 
@@ -295,6 +494,70 @@ def contains_suspicious_shortlink(content: str) -> bool:
     for pattern in SUSPICIOUS_SHORTLINK_PATTERNS:
         if re.search(pattern, lowered):
             return True
+    return False
+
+
+# ==========================================
+# LOGIKA PEMBATASAN CHANNEL RANK
+# ==========================================
+def is_rank_channel_allowed(ctx) -> tuple:
+    """Mengecek apakah perintah !rank diizinkan di channel ini."""
+    if ctx.author.guild_permissions.manage_guild:
+        return True, None
+
+    config = load_config()
+    guild_id = str(ctx.guild.id)
+    guild_conf = config.get(guild_id, {})
+
+    locked_channel_id = guild_conf.get("rank_channel_id")
+    if locked_channel_id == "all":
+        return True, None
+
+    if locked_channel_id:
+        if ctx.channel.id == int(locked_channel_id):
+            return True, None
+        return False, f"<#{locked_channel_id}>"
+
+    rank_channel = discord.utils.get(ctx.guild.text_channels, name="rank")
+    if rank_channel:
+        if ctx.channel.id == rank_channel.id:
+            return True, None
+        return False, rank_channel.mention
+
+    return True, None
+
+
+# ==========================================
+# LOGIKA KEKEBALAN / FREEDOM AUTO-MOD
+# ==========================================
+def has_automod_immunity(member: discord.Member) -> bool:
+    """
+    Mengecek apakah member memiliki kekebalan (immunity/freedom) dari Auto-Mod:
+    1. Member memiliki role bernama 'Fredom' atau 'Freedom' (case-insensitive).
+    2. Member memiliki role yang didaftarkan khusus via !addbypassrole.
+    3. Administrator server (Manage Server / Administrator).
+    """
+    if not isinstance(member, discord.Member):
+        return False
+
+    # 1. Admin & Server Manager selalu kebal
+    if member.guild_permissions.administrator or member.guild_permissions.manage_guild:
+        return True
+
+    # 2. Cek nama role 'Fredom' atau 'Freedom'
+    for role in member.roles:
+        clean_name = role.name.lower().strip()
+        if clean_name in ["fredom", "freedom", "bypass", "immune", "vip"]:
+            return True
+
+    # 3. Cek ID role yang didaftarkan via konfigurasi
+    config = load_config()
+    guild_id = str(member.guild.id)
+    bypass_role_ids = config.get(guild_id, {}).get("bypass_roles", [])
+    for role in member.roles:
+        if role.id in bypass_role_ids or str(role.id) in bypass_role_ids:
+            return True
+
     return False
 
 
@@ -450,7 +713,8 @@ async def start_web_health_server():
             "status": "online",
             "bot": str(bot.user) if bot.user else "Starting...",
             "database_file": DATA_FILE,
-            "total_users": len(load_data())
+            "total_users": len(load_data()),
+            "banned_keywords_count": len(BANNED_KEYWORDS)
         })
 
     app.router.add_get("/", handle_health)
@@ -473,14 +737,15 @@ async def on_ready():
     print(f"Prefix Perintah           : {COMMAND_PREFIX}")
     print(f"Penyimpanan Data          : {DATA_FILE}")
     print(f"Filter Konten Terlarang   : Aktif ({len(BANNED_KEYWORDS)} kata kunci)")
-    print(f"Filter Shortlink & Invite : Aktif")
+    print(f"Sistem Strike / Hukuman   : Aktif (3x Mute 5 Menit, 10x Kick)")
+    print(f"Smart Bypass Normalizer   : Aktif (Leetspeak, De-spacing, Simbol)")
     print(f"Sistem Level & Anti-Cheat : 4 Lapis Aktif (Atomic Storage)")
     print("=" * 55)
 
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.watching,
-            name="keamanan & chat server | Ketik !help"
+            name="keamanan server | Ketik !help"
         )
     )
 
@@ -499,51 +764,34 @@ async def on_message(message):
 
     content = message.content
 
-    # 1. Filter Konten Terlarang & Auto-Mod
-    if contains_banned_content(content):
-        try:
-            await message.delete()
-        except (discord.Forbidden, discord.NotFound):
-            pass
+    # 1. Filter Konten Terlarang & Auto-Mod dengan Sistem Strike (Dilewati jika user punya role Fredom / Kebal)
+    if not has_automod_immunity(message.author):
+        if contains_banned_content(content):
+            try:
+                await message.delete()
+            except (discord.Forbidden, discord.NotFound):
+                pass
 
-        try:
-            warning = await message.channel.send(
-                f"⚠️ {message.author.mention}, pesanmu dihapus karena mengandung konten terlarang di server ini."
-            )
-            await warning.delete(delay=8)
-        except Exception:
-            pass
-        return
+            await apply_warning_punishment(message, reason="Judi Online / Konten Dewasa / Kata Terlarang")
+            return
 
-    if is_suspicious_discord_invite(content):
-        try:
-            await message.delete()
-        except (discord.Forbidden, discord.NotFound):
-            pass
+        if is_suspicious_discord_invite(content):
+            try:
+                await message.delete()
+            except (discord.Forbidden, discord.NotFound):
+                pass
 
-        try:
-            warning = await message.channel.send(
-                f"⚠️ {message.author.mention}, link undangan Discord mengarah ke server NSFW/dewasa tidak diizinkan. Pesan telah dihapus."
-            )
-            await warning.delete(delay=8)
-        except Exception:
-            pass
-        return
+            await apply_warning_punishment(message, reason="Link Undangan Server Discord NSFW/Dewasa")
+            return
 
-    if contains_suspicious_shortlink(content):
-        try:
-            await message.delete()
-        except (discord.Forbidden, discord.NotFound):
-            pass
+        if contains_suspicious_shortlink(content):
+            try:
+                await message.delete()
+            except (discord.Forbidden, discord.NotFound):
+                pass
 
-        try:
-            warning = await message.channel.send(
-                f"⚠️ {message.author.mention}, tautan pemendek (shortlink) tidak diizinkan demi keamanan server. Silakan kirim tautan langsung."
-            )
-            await warning.delete(delay=8)
-        except Exception:
-            pass
-        return
+            await apply_warning_punishment(message, reason="Tautan Pemendek / Shortlink Berbahaya")
+            return
 
     # 2. Proses XP dengan Anti-Cheat (XP bisa didapat dari SEMUA channel)
     user_id = str(message.author.id)
@@ -715,8 +963,168 @@ async def leaderboard(ctx):
 
 
 # ==========================================
-# COMMANDS ADMIN (MANAGE GUILD)
+# COMMANDS ADMIN (MANAGE GUILD & MODERASI)
 # ==========================================
+@bot.command(name="warnings", aliases=["cekstrike", "warns"])
+@commands.guild_only()
+@commands.has_permissions(manage_guild=True)
+async def warnings_cmd(ctx, member: discord.Member):
+    """[ADMIN ONLY] Melihat total peringatan pelanggaran yang dimiliki member."""
+    warns_data = load_warnings()
+    guild_id = str(ctx.guild.id)
+    user_id = str(member.id)
+    count = warns_data.get(guild_id, {}).get(user_id, 0)
+
+    embed = discord.Embed(
+        title=f"📋 Catatan Peringatan — {member.display_name}",
+        description=(
+            f"👤 **Member:** {member.mention}\n"
+            f"📊 **Total Peringatan:** **{count}/10**\n\n"
+            f"• *3x Peringatan*: Auto-Mute 5 Menit\n"
+            f"• *10x Peringatan*: Auto-Kick dari Server"
+        ),
+        color=discord.Color.orange() if count > 0 else discord.Color.green()
+    )
+    embed.set_thumbnail(url=member.display_avatar.url)
+    await ctx.send(embed=embed)
+
+
+@warnings_cmd.error
+async def warnings_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("⛔ Perintah ini khusus Admin (memerlukan izin `Manage Server`).")
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send("⚠️ Masukkan member yang ingin dicek. Contoh: `!warnings @Budi`")
+
+
+@bot.command(name="resetwarn", aliases=["clearwarn", "clearwarnings"])
+@commands.guild_only()
+@commands.has_permissions(manage_guild=True)
+async def resetwarn_cmd(ctx, member: discord.Member):
+    """[ADMIN ONLY] Menghapus/mereset seluruh peringatan member ke 0."""
+    guild_id = str(ctx.guild.id)
+    user_id = str(member.id)
+
+    async with db_lock:
+        warns_data = load_warnings()
+        if guild_id in warns_data and user_id in warns_data[guild_id]:
+            warns_data[guild_id][user_id] = 0
+            save_warnings(warns_data)
+
+    await ctx.send(f"✅ Seluruh peringatan untuk {member.mention} berhasil **di-reset ke 0**!")
+
+
+@resetwarn_cmd.error
+async def resetwarn_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("⛔ Perintah ini khusus Admin (memerlukan izin `Manage Server`).")
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send("⚠️ Masukkan member yang ingin di-reset. Contoh: `!resetwarn @Budi`")
+
+
+@bot.command(name="warn")
+@commands.guild_only()
+@commands.has_permissions(manage_guild=True)
+async def warn_cmd(ctx, member: discord.Member, *, reason: str = "Pelanggaran Aturan Server"):
+    """[ADMIN ONLY] Memberikan peringatan manual ke member."""
+    # Simulasi pesan untuk memicu apply_warning_punishment
+    mock_msg = ctx.message
+    mock_msg.author = member
+    await apply_warning_punishment(mock_msg, reason=f"Peringatan Manual dari Admin: {reason}")
+    await ctx.send(f"✅ Peringatan manual berhasil diberikan ke {member.mention} (Alasan: {reason}).")
+
+
+@warn_cmd.error
+async def warn_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("⛔ Perintah ini khusus Admin (memerlukan izin `Manage Server`).")
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send("⚠️ Format: `!warn @member <alasan>`")
+
+
+@bot.command(name="addbypassrole", aliases=["setbypassrole", "kebalrole"])
+@commands.guild_only()
+@commands.has_permissions(manage_guild=True)
+async def addbypassrole_cmd(ctx, role: discord.Role):
+    """[ADMIN ONLY] Memberikan kekebalan penuh (Freedom) dari Auto-Mod ke role tertentu."""
+    config = load_config()
+    guild_id = str(ctx.guild.id)
+    if guild_id not in config:
+        config[guild_id] = {}
+
+    if "bypass_roles" not in config[guild_id]:
+        config[guild_id]["bypass_roles"] = []
+
+    if role.id in config[guild_id]["bypass_roles"]:
+        await ctx.send(f"⚠️ Role {role.mention} sudah ada di daftar role kebal auto-mod.")
+        return
+
+    config[guild_id]["bypass_roles"].append(role.id)
+    save_config(config)
+    await ctx.send(f"✅ Role {role.mention} berhasil diberikan **Kekebalan Penuh (Freedom/Immunity)** dari seluruh filter Auto-Mod!")
+
+
+@addbypassrole_cmd.error
+async def addbypassrole_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("⛔ Perintah ini khusus Admin (memerlukan izin `Manage Server`).")
+    elif isinstance(error, (commands.MissingRequiredArgument, commands.BadArgument)):
+        await ctx.send("⚠️ Format: `!addbypassrole @NamaRole` (contoh: `!addbypassrole @Fredom`)")
+
+
+@bot.command(name="removebypassrole", aliases=["delbypassrole"])
+@commands.guild_only()
+@commands.has_permissions(manage_guild=True)
+async def removebypassrole_cmd(ctx, role: discord.Role):
+    """[ADMIN ONLY] Menghapus status kekebalan auto-mod dari suatu role."""
+    config = load_config()
+    guild_id = str(ctx.guild.id)
+    if guild_id in config and "bypass_roles" in config[guild_id]:
+        if role.id in config[guild_id]["bypass_roles"]:
+            config[guild_id]["bypass_roles"].remove(role.id)
+            save_config(config)
+            await ctx.send(f"✅ Status kekebalan untuk role {role.mention} telah dicabut.")
+            return
+    await ctx.send(f"⚠️ Role {role.mention} tidak ditemukan di daftar role kebal kustom.")
+
+
+@removebypassrole_cmd.error
+async def removebypassrole_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("⛔ Perintah ini khusus Admin (memerlukan izin `Manage Server`).")
+    elif isinstance(error, (commands.MissingRequiredArgument, commands.BadArgument)):
+        await ctx.send("⚠️ Format: `!removebypassrole @NamaRole`")
+
+
+@bot.command(name="bypassroles", aliases=["listbypassroles"])
+@commands.guild_only()
+@commands.has_permissions(manage_guild=True)
+async def listbypassroles_cmd(ctx):
+    """[ADMIN ONLY] Melihat daftar role yang memiliki kekebalan Auto-Mod (Freedom)."""
+    config = load_config()
+    guild_id = str(ctx.guild.id)
+    bypass_role_ids = config.get(guild_id, {}).get("bypass_roles", [])
+
+    lines = ["• Role bernama `Fredom` atau `Freedom` *(Bawaan Otomatis Aktif)*"]
+    for rid in bypass_role_ids:
+        r = ctx.guild.get_role(int(rid))
+        if r:
+            lines.append(f"• {r.mention}")
+
+    embed = discord.Embed(
+        title="👑 Daftar Role Kebal Auto-Mod (Freedom)",
+        description="\n".join(lines),
+        color=discord.Color.gold()
+    )
+    await ctx.send(embed=embed)
+
+
+@listbypassroles_cmd.error
+async def listbypassroles_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("⛔ Perintah ini khusus Admin (memerlukan izin `Manage Server`).")
+
+
 @bot.command(name="setrankchannel")
 @commands.guild_only()
 @commands.has_permissions(manage_guild=True)
@@ -744,7 +1152,6 @@ async def setrankchannel(ctx, channel_target: str = "here"):
     elif ctx.message.channel_mentions:
         target_ch = ctx.message.channel_mentions[0]
     else:
-        # Cari berdasarkan ID atau nama
         clean_id = re.sub(r"[<#>]", "", channel_target)
         if clean_id.isdigit():
             target_ch = ctx.guild.get_channel(int(clean_id))
@@ -884,29 +1291,33 @@ async def banwordlist_error(ctx, error):
 @commands.guild_only()
 @commands.has_permissions(manage_guild=True)
 async def exportdata(ctx):
-    """[ADMIN ONLY] Mengunduh file backup data levels.json & banned_words.json."""
+    """[ADMIN ONLY] Mengunduh file backup data levels.json, banned_words.json & warnings.json."""
     data = load_data()
     banwords = load_banned_words()
+    warns = load_warnings()
 
     data_json_bytes = json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
     banwords_json_bytes = json.dumps(banwords, indent=2, ensure_ascii=False).encode("utf-8")
+    warns_json_bytes = json.dumps(warns, indent=2, ensure_ascii=False).encode("utf-8")
 
     file_levels = discord.File(io.BytesIO(data_json_bytes), filename="levels.json")
     file_banwords = discord.File(io.BytesIO(banwords_json_bytes), filename="banned_words.json")
+    file_warns = discord.File(io.BytesIO(warns_json_bytes), filename="warnings.json")
 
     embed = discord.Embed(
         title="💾 Backup & Migrasi Data",
         description=(
             f"✅ Berhasil mengekspor data:\n"
             f"• **Total Member Terdata**: {len(data)} user\n"
-            f"• **Total Filter Terlarang**: {len(banwords)} kata\n\n"
+            f"• **Total Filter Terlarang**: {len(banwords)} kata\n"
+            f"• **Catatan Peringatan**: Aktif\n\n"
             f"Simpan file ini jika ingin berpindah akun Railway / platform hosting lain.\n"
             f"Gunakan perintah `!importdata` di bot baru untuk me-restore."
         ),
         color=discord.Color.blue()
     )
 
-    await ctx.send(embed=embed, files=[file_levels, file_banwords])
+    await ctx.send(embed=embed, files=[file_levels, file_banwords, file_warns])
 
 
 @exportdata.error
@@ -999,16 +1410,19 @@ async def help_cmd(ctx):
         name="🛡️ Perintah Admin (Izin: Manage Server)",
         value=(
             "• `!setrankchannel [#channel/here/all]` — Kunci command !rank hanya di channel tertentu\n"
+            "• `!warnings @user` — Cek total peringatan pelanggaran member\n"
+            "• `!resetwarn @user` — Reset peringatan member ke 0\n"
+            "• `!warn @user <alasan>` — Beri peringatan manual ke member\n"
             "• `!addxp @user <jumlah>` — Tambah bonus XP (maks. 10.000)\n"
             "• `!setlevel @user <level>` — Ubah level member langsung (0 - 1000)\n"
             "• `!addbanword <kata>` — Tambahkan kata kunci ke filter terlarang\n"
             "• `!banwordlist` — Cek jumlah kata terlarang aktif\n"
-            "• `!exportdata` — Unduh backup data levels & banwords\n"
+            "• `!exportdata` — Unduh backup database lengkap\n"
             "• `!importdata` — Restore data backup via attachment"
         ),
         inline=False
     )
-    embed.set_footer(text="Auto-Mod & Anti-Cheat aktif melindungi server secara otomatis.")
+    embed.set_footer(text="Auto-Mod, Anti-Cheat, & Sistem Strike aktif melindungi server secara otomatis.")
     await ctx.send(embed=embed)
 
 
