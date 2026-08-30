@@ -1,5 +1,5 @@
 """
-Bot Discord Level & Rank - "Sinyal" (Multi-Platform & Ultra-Secure Edition)
+Bot Discord Level & Rank - "Sinyal" (Multi-Platform & Channel Lock Edition)
 =============================================================================
 Fitur Utama:
 1. Sistem Level & XP Otomatis:
@@ -7,23 +7,28 @@ Fitur Utama:
    - Anti-cheat 4 lapis: min. 5 karakter, variasi karakter unik, batas 20x XP per jam
    - Otomatis mengabaikan command bot (prefix '!') agar tidak disalahgunakan untuk spam XP
    - Tracking Total XP Lifetime (seluruh riwayat XP tersimpan aman)
-2. Auto-Moderasi & Filter Konten Terlarang:
+2. Pembatasan Channel Cek Rank Khusus:
+   - Perintah `!rank` dan `!leaderboard` otomatis dibatasi HANYA di channel `#rank` (atau channel yang diset admin)
+   - Jika member ketik `!rank` di channel lain, bot akan memberi tahu untuk pindah ke channel `#rank` (pesan peringatan terhapus otomatis dalam 6 detik)
+   - Perintah admin `!setrankchannel #channel` / `here` / `all` untuk mengatur channel khusus
+3. Auto-Moderasi & Filter Konten Terlarang:
    - Filter kata kunci judi online & konten dewasa dengan boundary regex (bebas false-positive & ReDoS safe)
    - Filter shortlink berbahaya (bit.ly, tinyurl, cutt.ly, s.id, dll)
    - Deteksi & blokir link undangan Discord yang mengarah ke server NSFW/dewasa
    - Perintah admin `!addbanword` dan `!banwordlist` dengan penyimpanan permanen & atomic write
-3. Perintah Member:
+4. Perintah Member:
    - `!rank` / `!rank @user` — Profil level, XP, visual progress bar, ranking, & total lifetime XP
-   - `!leaderboard` (atau `!top`, `!lb`) — Top 10 leaderboard server dengan medali (aman dari rate limit)
+   - `!leaderboard` (atau `!top`, `!lb`) — Top 10 leaderboard server dengan medali
    - `!help` — Menu bantuan interaktif
-4. Perintah Admin (Manage Server):
+5. Perintah Admin (Manage Server):
    - `!addxp @user <jumlah>` — Tambah XP (maks. 10.000)
    - `!setlevel @user <level>` — Set level (rentang 0-1000) dengan sinkronisasi Total XP
+   - `!setrankchannel [#channel/here/all]` — Kunci perintah !rank hanya di channel tertentu
    - `!addbanword <kata>` — Tambah kata terlarang ke filter
    - `!banwordlist` — Cek jumlah kata terlarang aktif
    - `!exportdata` — (Backup) Unduh file database levels & banwords langsung di Discord
    - `!importdata` — (Restore/Migrasi) Upload file backup levels.json untuk memindahkan data antar platform
-5. Kompatibilitas Multi-Platform (Railway, Render, VPS, Heroku, Docker, Local):
+6. Kompatibilitas Multi-Platform (Railway, Render, VPS, Heroku, Docker, Local):
    - Multi-token variable support (DISCORD_TOKEN, BOT_TOKEN, TOKEN)
    - Configurable DATA_DIR untuk Persistent Volume
    - Built-in HTTP Health Check Server (otomatis aktif jika env PORT terdeteksi)
@@ -64,6 +69,7 @@ os.makedirs(DATA_DIR, exist_ok=True)
 
 DATA_FILE = os.path.join(DATA_DIR, "levels.json")
 BANWORDS_FILE = os.path.join(DATA_DIR, "banned_words.json")
+CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 COMMAND_PREFIX = "!"
 PORT = os.environ.get("PORT")  # Mendeteksi port dari Railway/Render
 
@@ -130,8 +136,35 @@ xp_history_per_hour = {}    # {user_id: [timestamp_1, timestamp_2, ...]}
 
 
 # ==========================================
-# MANAJEMEN BANNED WORDS PERSISTEN (ATOMIC WRITE)
+# MANAJEMEN CONFIG & BANNED WORDS (ATOMIC)
 # ==========================================
+def load_config() -> dict:
+    """Memuat konfigurasi server (seperti channel rank yang diizinkan)."""
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def save_config(config_data: dict):
+    """Menyimpan konfigurasi server menggunakan Atomic Write."""
+    tmp_file = f"{CONFIG_FILE}.tmp"
+    try:
+        with open(tmp_file, "w", encoding="utf-8") as f:
+            json.dump(config_data, f, indent=2, ensure_ascii=False)
+        os.replace(tmp_file, CONFIG_FILE)
+    except Exception as e:
+        print(f"[ERROR] Gagal menyimpan config ke {CONFIG_FILE}: {e}")
+        if os.path.exists(tmp_file):
+            try:
+                os.remove(tmp_file)
+            except Exception:
+                pass
+
+
 def load_banned_words() -> list:
     """Memuat daftar kata terlarang dari file JSON agar tersimpan permanen."""
     words = list(DEFAULT_BANNED_KEYWORDS)
@@ -167,6 +200,45 @@ def save_banned_words(words_list: list):
 
 
 BANNED_KEYWORDS = load_banned_words()
+
+
+# ==========================================
+# LOGIKA PEMBATASAN CHANNEL RANK
+# ==========================================
+def is_rank_channel_allowed(ctx) -> tuple:
+    """
+    Mengecek apakah perintah !rank atau !leaderboard diizinkan di channel ini.
+    - Admin (Manage Server) selalu diizinkan di mana saja.
+    - Jika ada channel yang dikunci via !setrankchannel, hanya channel itu yang diizinkan.
+    - Jika belum dikunci manual, otomatis mencari channel bernama 'rank' di server.
+    """
+    # Admin bebas pakai di mana saja
+    if ctx.author.guild_permissions.manage_guild:
+        return True, None
+
+    config = load_config()
+    guild_id = str(ctx.guild.id)
+    guild_conf = config.get(guild_id, {})
+
+    # 1. Cek jika admin sudah mengunci channel tertentu secara spesifik
+    locked_channel_id = guild_conf.get("rank_channel_id")
+    if locked_channel_id == "all":
+        return True, None
+
+    if locked_channel_id:
+        if ctx.channel.id == int(locked_channel_id):
+            return True, None
+        return False, f"<#{locked_channel_id}>"
+
+    # 2. Jika belum dikonfigurasi manual, cek apakah ada channel bernama 'rank' di server
+    rank_channel = discord.utils.get(ctx.guild.text_channels, name="rank")
+    if rank_channel:
+        if ctx.channel.id == rank_channel.id:
+            return True, None
+        return False, rank_channel.mention
+
+    # 3. Jika tidak ada channel khusus, izinkan di semua channel
+    return True, None
 
 
 # ==========================================
@@ -412,7 +484,6 @@ async def on_ready():
         )
     )
 
-    # Jalankan HTTP server jika ada port environment
     if PORT:
         bot.loop.create_task(start_web_health_server())
 
@@ -474,7 +545,7 @@ async def on_message(message):
             pass
         return
 
-    # 2. Proses XP dengan Anti-Cheat
+    # 2. Proses XP dengan Anti-Cheat (XP bisa didapat dari SEMUA channel)
     user_id = str(message.author.id)
     now = time.time()
 
@@ -510,12 +581,23 @@ async def on_message(message):
 
 
 # ==========================================
-# COMMANDS MEMBER
+# COMMANDS MEMBER (DENGAN PEMBATASAN CHANNEL)
 # ==========================================
 @bot.command(name="rank", aliases=["level", "xp", "lvl"])
 @commands.guild_only()
 async def rank(ctx, member: discord.Member = None):
     """Cek level, XP, dan rank diri sendiri atau member lain."""
+    allowed, target_channel = is_rank_channel_allowed(ctx)
+    if not allowed:
+        try:
+            warning = await ctx.send(
+                f"❌ {ctx.author.mention}, perintah cek rank hanya diizinkan di channel {target_channel}!"
+            )
+            await warning.delete(delay=6)
+        except Exception:
+            pass
+        return
+
     target = member or ctx.author
     data = load_data()
     user_id = str(target.id)
@@ -559,6 +641,17 @@ async def rank(ctx, member: discord.Member = None):
 @commands.guild_only()
 async def leaderboard(ctx):
     """Menampilkan 10 member dengan level tertinggi di server."""
+    allowed, target_channel = is_rank_channel_allowed(ctx)
+    if not allowed:
+        try:
+            warning = await ctx.send(
+                f"❌ {ctx.author.mention}, perintah leaderboard hanya diizinkan di channel {target_channel}!"
+            )
+            await warning.delete(delay=6)
+        except Exception:
+            pass
+        return
+
     data = load_data()
 
     if not data:
@@ -624,6 +717,55 @@ async def leaderboard(ctx):
 # ==========================================
 # COMMANDS ADMIN (MANAGE GUILD)
 # ==========================================
+@bot.command(name="setrankchannel")
+@commands.guild_only()
+@commands.has_permissions(manage_guild=True)
+async def setrankchannel(ctx, channel_target: str = "here"):
+    """
+    [ADMIN ONLY] Mengatur channel khusus untuk perintah !rank dan !leaderboard.
+    Format:
+    - !setrankchannel #channel (kunci ke channel tertentu)
+    - !setrankchannel here (kunci ke channel saat ini)
+    - !setrankchannel all (izinkan di semua channel)
+    """
+    config = load_config()
+    guild_id = str(ctx.guild.id)
+    if guild_id not in config:
+        config[guild_id] = {}
+
+    if channel_target.lower() == "all":
+        config[guild_id]["rank_channel_id"] = "all"
+        save_config(config)
+        await ctx.send("✅ Perintah `!rank` dan `!leaderboard` sekarang **diizinkan di semua channel**.")
+        return
+
+    if channel_target.lower() == "here":
+        target_ch = ctx.channel
+    elif ctx.message.channel_mentions:
+        target_ch = ctx.message.channel_mentions[0]
+    else:
+        # Cari berdasarkan ID atau nama
+        clean_id = re.sub(r"[<#>]", "", channel_target)
+        if clean_id.isdigit():
+            target_ch = ctx.guild.get_channel(int(clean_id))
+        else:
+            target_ch = discord.utils.get(ctx.guild.text_channels, name=channel_target.lower().replace("#", ""))
+
+    if not target_ch or not isinstance(target_ch, discord.TextChannel):
+        await ctx.send("❌ Channel tidak ditemukan! Gunakan format: `!setrankchannel #rank` atau `!setrankchannel here`")
+        return
+
+    config[guild_id]["rank_channel_id"] = target_ch.id
+    save_config(config)
+    await ctx.send(f"✅ Perintah `!rank` dan `!leaderboard` berhasil dikunci **HANYA di channel {target_ch.mention}**!")
+
+
+@setrankchannel.error
+async def setrankchannel_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("⛔ Perintah ini khusus Admin (memerlukan izin `Manage Server`).")
+
+
 @bot.command(name="addxp")
 @commands.guild_only()
 @commands.has_permissions(manage_guild=True)
@@ -738,9 +880,6 @@ async def banwordlist_error(ctx, error):
         await ctx.send("⛔ Perintah ini khusus Admin (memerlukan izin `Manage Server`).")
 
 
-# ==========================================
-# COMMANDS ADMIN MIGRASI & BACKUP DATA
-# ==========================================
 @bot.command(name="exportdata", aliases=["backupdata", "backuplevels"])
 @commands.guild_only()
 @commands.has_permissions(manage_guild=True)
@@ -797,7 +936,6 @@ async def importdata(ctx):
         content_bytes = await attachment.read()
         imported_data = json.loads(content_bytes.decode("utf-8"))
 
-        # Validasi struktur data agar tidak merusak database
         if not isinstance(imported_data, dict):
             await ctx.send("❌ Format struktur isi file JSON tidak valid.")
             return
@@ -815,7 +953,6 @@ async def importdata(ctx):
 
         async with db_lock:
             current_data = load_data()
-            # Gabungkan / timpa data dengan backup
             current_data.update(cleaned_data)
             save_data(current_data)
 
@@ -861,6 +998,7 @@ async def help_cmd(ctx):
     embed.add_field(
         name="🛡️ Perintah Admin (Izin: Manage Server)",
         value=(
+            "• `!setrankchannel [#channel/here/all]` — Kunci command !rank hanya di channel tertentu\n"
             "• `!addxp @user <jumlah>` — Tambah bonus XP (maks. 10.000)\n"
             "• `!setlevel @user <level>` — Ubah level member langsung (0 - 1000)\n"
             "• `!addbanword <kata>` — Tambahkan kata kunci ke filter terlarang\n"
@@ -883,7 +1021,7 @@ async def on_command_error(ctx, error):
         if isinstance(error, commands.NoPrivateMessage):
             await ctx.send("❌ Perintah ini hanya bisa digunakan di dalam server Discord, bukan melalui Direct Message (DM).")
         elif isinstance(error, commands.CommandNotFound):
-            pass  # Abaikan command yang tidak dikenali
+            pass
         else:
             if not hasattr(ctx.command, 'on_error'):
                 print(f"[GLOBAL COMMAND ERROR] {error}")
