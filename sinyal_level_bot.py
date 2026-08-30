@@ -401,33 +401,44 @@ async def apply_warning_punishment(message: discord.Message, reason: str):
 def normalize_text_variants(text: str) -> list:
     """
     Menghasilkan variasi bentuk teks untuk mendeteksi berbagai teknik bypass:
-    1. Lowercase asli
-    2. Menghilangkan simbol pemisah (misal: 'x.n.x.x' -> 'x n x x')
-    3. De-spacing: menghapus spasi di antara huruf tunggal (misal: 'x n x x' -> 'xnxx')
-    4. Alphanumeric only (misal: 'b_o_k_e_p' -> 'bokep')
-    5. Leetspeak: mengubah @->a, 0->o, 1/!->i, $->s, 3->e, 4->a, 5->s, 7->t, 8->b
+    1. Menghapus Zero-Width Space & Karakter Tak Terlihat (ZWSP, ZWNJ, ZWJ, soft hyphen, dll)
+    2. Mengubah Homoglyphs Cyrillic/Greek ke Latin (misal: 'х' cyrillic -> 'x', 'а' -> 'a', 'о' -> 'o', 'р' -> 'p')
+    3. Menghilangkan simbol pemisah (misal: 'x.n.x.x' -> 'x n x x')
+    4. De-spacing: menghapus spasi di antara huruf tunggal (misal: 'x n x x' -> 'xnxx')
+    5. Alphanumeric only (misal: 'b_o_k_e_p' -> 'bokep')
+    6. Leetspeak: mengubah @->a, 0->o, 1/!->i, $->s, 3->e, 4->a, 5->s, 7->t, 8->b
     """
     if not text:
         return []
 
-    lowered = text.lower()
+    # 1. Bersihkan invisible unicode characters
+    clean_invisible = re.sub(r"[\u200B-\u200D\uFEFF\u00AD\u2060\u180E\u2000-\u200A\u034F]", "", str(text))
+
+    # 2. Homoglyph mapping (Cyrillic & Greek lookalikes to Latin)
+    homoglyph_map = str.maketrans({
+        "а": "a", "о": "o", "е": "e", "р": "p", "с": "c", "х": "x", "у": "y", "і": "i", "ј": "j", "ѕ": "s",
+        "п": "n", "н": "n", "т": "t", "к": "k", "м": "m", "в": "b",
+        "А": "a", "О": "o", "Е": "e", "Р": "p", "С": "c", "Х": "x", "У": "y", "І": "i", "Ј": "j", "Ѕ": "s",
+        "П": "n", "Н": "n", "Т": "t", "К": "k", "М": "m", "В": "b"
+    })
+    lowered = clean_invisible.translate(homoglyph_map).lower()
     variants = [lowered]
 
-    # 1. Simbol pemisah -> spasi
+    # 3. Simbol pemisah -> spasi
     no_symbols = re.sub(r"[\_\-\.\,\;\|\/\\\*\~\#\+\=\:\(\)\[\]\{\}\?\<\>\!]", " ", lowered)
     variants.append(no_symbols)
     clean_spaces = re.sub(r"\s+", " ", no_symbols).strip()
     variants.append(clean_spaces)
 
-    # 2. De-spacing (mengubah 'x n x x' -> 'xnxx')
+    # 4. De-spacing (mengubah 'x n x x' -> 'xnxx')
     despaced = re.sub(r"(?<=\b\w)\s+(?=\w\b)", "", clean_spaces)
     variants.append(despaced)
 
-    # 3. Alphanumeric only (menghilangkan semua non-huruf angka)
+    # 5. Alphanumeric only (menghilangkan semua non-huruf angka)
     alphanumeric_only = re.sub(r"[^a-z0-9]", "", lowered)
     variants.append(alphanumeric_only)
 
-    # 4. Leetspeak mapping
+    # 6. Leetspeak mapping
     leetspeak_map = str.maketrans({
         "@": "a", "4": "a", "0": "o", "1": "i", "!": "i", "3": "e", "$": "s", "5": "s", "7": "t", "8": "b"
     })
@@ -533,24 +544,18 @@ def is_rank_channel_allowed(ctx) -> tuple:
 def has_automod_immunity(member: discord.Member) -> bool:
     """
     Mengecek apakah member memiliki kekebalan (immunity/freedom) dari Auto-Mod:
-    1. Member memiliki role bernama 'Fredom' atau 'Freedom' (case-insensitive).
-    2. Member memiliki role yang didaftarkan khusus via !addbypassrole.
-    3. Administrator server (Manage Server / Administrator).
+    HANYA member yang memiliki role bernama 'Fredom' atau 'Freedom' (atau role yang didaftarkan via !addbypassrole).
     """
     if not isinstance(member, discord.Member):
         return False
 
-    # 1. Admin & Server Manager selalu kebal
-    if member.guild_permissions.administrator or member.guild_permissions.manage_guild:
-        return True
-
-    # 2. Cek nama role 'Fredom' atau 'Freedom'
+    # 1. Cek nama role 'Fredom' atau 'Freedom'
     for role in member.roles:
         clean_name = role.name.lower().strip()
-        if clean_name in ["fredom", "freedom", "bypass", "immune", "vip"]:
+        if clean_name in ["fredom", "freedom", "bypass", "immune"]:
             return True
 
-    # 3. Cek ID role yang didaftarkan via konfigurasi
+    # 2. Cek ID role yang didaftarkan via konfigurasi
     config = load_config()
     guild_id = str(member.guild.id)
     bypass_role_ids = config.get(guild_id, {}).get("bypass_roles", [])
@@ -765,30 +770,40 @@ async def on_message(message):
     content = message.content
 
     # 1. Filter Konten Terlarang & Auto-Mod dengan Sistem Strike (Dilewati jika user punya role Fredom / Kebal)
-    if not has_automod_immunity(message.author):
+    is_immune = has_automod_immunity(message.author)
+    if not is_immune:
         if contains_banned_content(content):
+            print(f"[AUTO-MOD BLOCKED] Pesan terlarang dari '{message.author.name}': '{content}' -> Menghapus & memproses sanksi...")
             try:
                 await message.delete()
-            except (discord.Forbidden, discord.NotFound):
-                pass
+            except discord.Forbidden:
+                print(f"[PERINGATAN IZIN] Bot TIDAK BISA menghapus pesan '{message.author.name}' karena bot belum diberi izin 'Manage Messages' di Discord!")
+            except Exception as e:
+                print(f"[WARN] Gagal hapus pesan: {e}")
 
             await apply_warning_punishment(message, reason="Judi Online / Konten Dewasa / Kata Terlarang")
             return
 
         if is_suspicious_discord_invite(content):
+            print(f"[AUTO-MOD BLOCKED] Link invite NSFW dari '{message.author.name}' -> Menghapus & memproses sanksi...")
             try:
                 await message.delete()
-            except (discord.Forbidden, discord.NotFound):
-                pass
+            except discord.Forbidden:
+                print(f"[PERINGATAN IZIN] Bot TIDAK BISA menghapus pesan karena bot belum diberi izin 'Manage Messages' di Discord!")
+            except Exception as e:
+                print(f"[WARN] Gagal hapus pesan: {e}")
 
             await apply_warning_punishment(message, reason="Link Undangan Server Discord NSFW/Dewasa")
             return
 
         if contains_suspicious_shortlink(content):
+            print(f"[AUTO-MOD BLOCKED] Shortlink berbahaya dari '{message.author.name}' -> Menghapus & memproses sanksi...")
             try:
                 await message.delete()
-            except (discord.Forbidden, discord.NotFound):
-                pass
+            except discord.Forbidden:
+                print(f"[PERINGATAN IZIN] Bot TIDAK BISA menghapus pesan karena bot belum diberi izin 'Manage Messages' di Discord!")
+            except Exception as e:
+                print(f"[WARN] Gagal hapus pesan: {e}")
 
             await apply_warning_punishment(message, reason="Tautan Pemendek / Shortlink Berbahaya")
             return
@@ -847,6 +862,10 @@ async def rank(ctx, member: discord.Member = None):
         return
 
     target = member or ctx.author
+    if target.bot:
+        await ctx.send("❌ Akun bot tidak memiliki profil Level dan XP.")
+        return
+
     data = load_data()
     user_id = str(target.id)
 
@@ -906,13 +925,17 @@ async def leaderboard(ctx):
         await ctx.send("Belum ada data leaderboard. Ayo mulai chat untuk dapat XP!")
         return
 
-    active_users = [
-        item for item in data.items() 
-        if item[1].get("level", 0) > 0 or item[1].get("xp", 0) > 0 or item[1].get("total_xp", 0) > 0
-    ]
+    # Filter hanya member server ini yang bukan bot dan memiliki XP/Level
+    active_users = []
+    for uid, stats in data.items():
+        if stats.get("level", 0) > 0 or stats.get("xp", 0) > 0 or stats.get("total_xp", 0) > 0:
+            if str(uid).isdigit():
+                m = ctx.guild.get_member(int(uid))
+                if m and not m.bot:
+                    active_users.append((uid, stats))
 
     if not active_users:
-        await ctx.send("Belum ada member yang mengumpulkan XP. Ayo mulai mengobrol!")
+        await ctx.send("Belum ada member yang mengumpulkan XP di server ini. Ayo mulai mengobrol!")
         return
 
     sorted_users = sorted(
@@ -934,16 +957,9 @@ async def leaderboard(ctx):
         needed = xp_needed_for_level(lvl)
 
         name = f"User ({uid})"
-        try:
-            member = ctx.guild.get_member(int(uid))
-            if member:
-                name = member.display_name
-            else:
-                cached_user = bot.get_user(int(uid))
-                if cached_user:
-                    name = cached_user.display_name if hasattr(cached_user, "display_name") else cached_user.name
-        except Exception:
-            pass
+        member = ctx.guild.get_member(int(uid))
+        if member:
+            name = member.display_name
 
         medal = medals.get(rank_idx, f"`#{rank_idx:02d}`")
         leaderboard_lines.append(
@@ -970,6 +986,10 @@ async def leaderboard(ctx):
 @commands.has_permissions(manage_guild=True)
 async def warnings_cmd(ctx, member: discord.Member):
     """[ADMIN ONLY] Melihat total peringatan pelanggaran yang dimiliki member."""
+    if member.bot:
+        await ctx.send("❌ Akun bot tidak memiliki catatan peringatan.")
+        return
+
     warns_data = load_warnings()
     guild_id = str(ctx.guild.id)
     user_id = str(member.id)
@@ -1002,6 +1022,10 @@ async def warnings_error(ctx, error):
 @commands.has_permissions(manage_guild=True)
 async def resetwarn_cmd(ctx, member: discord.Member):
     """[ADMIN ONLY] Menghapus/mereset seluruh peringatan member ke 0."""
+    if member.bot:
+        await ctx.send("❌ Akun bot tidak memiliki catatan peringatan.")
+        return
+
     guild_id = str(ctx.guild.id)
     user_id = str(member.id)
 
@@ -1027,7 +1051,10 @@ async def resetwarn_error(ctx, error):
 @commands.has_permissions(manage_guild=True)
 async def warn_cmd(ctx, member: discord.Member, *, reason: str = "Pelanggaran Aturan Server"):
     """[ADMIN ONLY] Memberikan peringatan manual ke member."""
-    # Simulasi pesan untuk memicu apply_warning_punishment
+    if member.bot:
+        await ctx.send("❌ Tidak dapat memberikan peringatan ke sesama akun bot.")
+        return
+
     mock_msg = ctx.message
     mock_msg.author = member
     await apply_warning_punishment(mock_msg, reason=f"Peringatan Manual dari Admin: {reason}")
@@ -1178,6 +1205,9 @@ async def setrankchannel_error(ctx, error):
 @commands.has_permissions(manage_guild=True)
 async def addxp(ctx, member: discord.Member, amount: int):
     """[ADMIN ONLY] Menambah XP ke member (maksimal 10.000 XP)."""
+    if member.bot:
+        await ctx.send("❌ Akun bot tidak dapat diberikan XP.")
+        return
     if amount <= 0:
         await ctx.send("❌ Jumlah XP harus lebih dari 0.")
         return
@@ -1213,6 +1243,9 @@ async def addxp_error(ctx, error):
 @commands.has_permissions(manage_guild=True)
 async def setlevel(ctx, member: discord.Member, level: int):
     """[ADMIN ONLY] Mengatur level member secara langsung (0 - 1000)."""
+    if member.bot:
+        await ctx.send("❌ Akun bot tidak dapat diatur levelnya.")
+        return
     if level < 0 or level > 1000:
         await ctx.send("❌ Level harus berada di antara rentang 0 sampai 1000.")
         return
